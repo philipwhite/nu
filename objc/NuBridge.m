@@ -1025,26 +1025,8 @@ id nu_calling_objc_method_handler(id target, Method_t m, NSMutableArray *args)
 
     // dynamically construct the method call
 
-//the method_***** functions seems to count c blocks twice, i.e. they separate
-//the @ and ?. Using an NSMethodSignature seems to be an easy way around it.
-//However, it appears to have some flaws as it causes 'nuke test' to fail
-#define USE_SIG 0
-
-#if USE_SIG
-	NSMethodSignature *sig = [target methodSignatureForSelector:s];
-	int argument_count = [sig numberOfArguments];
-    BOOL zeroArguments = NO;
-	if (argument_count == 0)
-	{
-        // - [NSMethodSignature numberOfArguments] returns 0 if there are no arguments, but we expect 2 (cmd and self).
-        // If we get zero, we use method_getNumberOfArguments() here, and method_getArgumentType() below.
-        // This works around Apple's bug in the method_*** functions, but allows 'nuke test' to pass
-        argument_count =  method_getNumberOfArguments(m);
-        zeroArguments = YES;
-	}
-#else
     int argument_count = method_getNumberOfArguments(m);
-#endif
+
 	if ( [args count] != argument_count-2) {
 		
 		raise_argc_exception(s, argument_count-2, [args count]);
@@ -1061,15 +1043,7 @@ id nu_calling_objc_method_handler(id target, Method_t m, NSMutableArray *args)
         int *argument_needs_retained = (int *) malloc (argument_count * sizeof(int));
         int i;
         for (i = 0; i < argument_count; i++) {
-			#if USE_SIG
-			if (zeroArguments) {
-			    method_getArgumentType(m, i, &arg_type_buffer[0], BUFSIZE);
-			} else {
-			    strncpy(&arg_type_buffer[0], [sig getArgumentTypeAtIndex:i], BUFSIZE);
-		    }
-			#else
-            method_getArgumentType(m, i, &arg_type_buffer[0], BUFSIZE);
-            #endif
+			method_getArgumentType(m, i, &arg_type_buffer[0], BUFSIZE);
 			
 			argument_types[i] = ffi_type_for_objc_type(&arg_type_buffer[0]);
             argument_values[i] = value_buffer_for_objc_type(&arg_type_buffer[0]);
