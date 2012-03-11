@@ -2482,7 +2482,7 @@ static id help_add_method_to_class(Class classToExtend, id cdr, NSMutableDiction
 static id make_cblock (NuBlock *nuBlock, NSString *signature);
 static void objc_calling_nu_block_handler(ffi_cif* cif, void* returnvalue, void** args, void* userdata);
 static char **generate_block_userdata(NuBlock *nuBlock, const char *signature);
-static void *construct_block_handler(NuBlock *block, const char *signature);
+static void *construct_block_handler(NuBlock *block, const char *signature, void **outCif);
 
 @interface NuBridgedBlock ()
 {
@@ -2524,7 +2524,8 @@ static void *construct_block_handler(NuBlock *block, const char *signature);
 //the caller gets ownership of the block
 static id make_cblock (NuBlock *nuBlock, NSString *signature)
 {
-	void *funcptr = construct_block_handler(nuBlock, [signature UTF8String]);
+    void *ffiBytes;
+	void *funcptr = construct_block_handler(nuBlock, [signature UTF8String], &ffiBytes);
     
 	int i = 0xFFFF;
 	void(^cBlock)(void)=[^(void){printf("%i",i);} copy];
@@ -2552,6 +2553,11 @@ static id make_cblock (NuBlock *nuBlock, NSString *signature)
 	//3*(sizeof(void*)) = 0xc
 	*((void **)(id)cBlock + 3) = (void *)funcptr;
 #endif
+    
+    //make sure that the ffi_cif data gets released when the block does
+    NSData *ffiData = [NSData dataWithBytesNoCopy:ffiBytes length:sizeof(ffi_cif) freeWhenDone:YES];
+    objc_setAssociatedObject(cBlock, "FFI_DATA", ffiData, OBJC_ASSOCIATION_RETAIN);
+    
 	return cBlock;
 }
 
@@ -2623,7 +2629,7 @@ static char **generate_block_userdata(NuBlock *nuBlock, const char *signature)
 }
 
 
-static void *construct_block_handler(NuBlock *block, const char *signature)
+static void *construct_block_handler(NuBlock *block, const char *signature, void **outCif)
 {
     char **userdata = generate_block_userdata(block, signature);
     
@@ -2673,6 +2679,7 @@ static void *construct_block_handler(NuBlock *block, const char *signature)
         NSLog(@"unable to prepare closure for signature %s (mprotect failed with error %d)", signature, errno);
         return NULL;
     }
+    *outCif = cif;
     return (void*)closure;
 }
 
