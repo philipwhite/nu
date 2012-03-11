@@ -2486,7 +2486,7 @@ static void *construct_block_handler(NuBlock *block, const char *signature, void
 
 @interface NuBridgedBlock ()
 {
-	NuBlock *nuBlock;	
+	NuBlock *nuBlock;
 	id cBlock;
 }
 @end
@@ -2527,32 +2527,29 @@ static id make_cblock (NuBlock *nuBlock, NSString *signature)
     void *ffiBytes;
 	void *funcptr = construct_block_handler(nuBlock, [signature UTF8String], &ffiBytes);
     
-	int i = 0xFFFF;
+	int i = (int)signature; //just some variable to be imported into the block to prevent
+    //a global block from being created
 	void(^cBlock)(void)=[^(void){printf("%i",i);} copy];
-	
-#ifdef __x86_64__
-	/*  this is what happens when a block is called on x86 64
-	 mov    %rax,-0x18(%rbp)		//the pointer to the block object is in rax
-	 mov    -0x18(%rbp),%rax
-	 mov    0x10(%rax),%rax			//the pointer to the block function is at +0x10 into the block object
-	 mov    -0x18(%rbp),%rdi		//the first argument (this examples has no others) is always the pointer to the block object
-	 callq  *%rax
-     */
-	//2*(sizeof(void*)) = 0x10
-	*((void **)(id)cBlock + 2) = (void *)funcptr;
-#else
-	/*  this is what happens when a block is called on x86 32
-	 mov    %eax,-0x14(%ebp)		//the pointer to the block object is in eax
-	 mov    -0x14(%ebp),%eax		
-	 mov    0xc(%eax),%eax			//the pointer to the block function is at +0xc into the block object
-	 mov    %eax,%edx
-	 mov    -0x14(%ebp),%eax		//the first argument (this examples has no others) is always the pointer to the block object
-	 mov    %eax,(%esp)
-	 call   *%edx
-	 */
-	//3*(sizeof(void*)) = 0xc
-	*((void **)(id)cBlock + 3) = (void *)funcptr;
-#endif
+    
+    //this definition from http://clang.llvm.org/docs/Block-ABI-Apple.txt
+    struct Block_literal {
+        void *isa; // initialized to &_NSConcreteStackBlock or &_NSConcreteGlobalBlock
+        int flags;
+        int reserved; 
+        void (*invoke)(void *, ...);
+        struct Block_descriptor_1 {
+            unsigned long int reserved;	// NULL
+            unsigned long int size;         // sizeof(struct Block_literal_1)
+            // optional helper functions
+            void (*copy_helper)(void *dst, void *src);     // IFF (1<<25)
+            void (*dispose_helper)(void *src);             // IFF (1<<25)
+            // required ABI.2010.3.16
+            const char *signature;                         // IFF (1<<30)
+        } *descriptor;
+        // imported variables
+    } *block_struct = (void*)cBlock;
+    
+    block_struct->invoke=funcptr;
     
     //make sure that the ffi_cif data gets released when the block does
     NSData *ffiData = [NSData dataWithBytesNoCopy:ffiBytes length:sizeof(ffi_cif) freeWhenDone:YES];
