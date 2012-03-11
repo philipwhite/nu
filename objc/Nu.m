@@ -2481,8 +2481,8 @@ static id help_add_method_to_class(Class classToExtend, id cdr, NSMutableDiction
 
 static id make_cblock (NuBlock *nuBlock, NSString *signature);
 static void objc_calling_nu_block_handler(ffi_cif* cif, void* returnvalue, void** args, void* userdata);
-static char **generate_block_userdata(NuBlock *nuBlock, const char *signature);
-static void *construct_block_handler(NuBlock *block, const char *signature, void **outCif);
+static char **generate_block_userdata(NuBlock *nuBlock, const char *signature, NSMutableArray *ffiData);
+static void *construct_block_handler(NuBlock *block, const char *signature, NSMutableArray *ffiData);
 
 @interface NuBridgedBlock ()
 {
@@ -2524,11 +2524,13 @@ static void *construct_block_handler(NuBlock *block, const char *signature, void
 //the caller gets ownership of the block
 static id make_cblock (NuBlock *nuBlock, NSString *signature)
 {
-    void *ffiBytes;
-	void *funcptr = construct_block_handler(nuBlock, [signature UTF8String], &ffiBytes);
+    NSMutableArray *ffiData = [NSMutableArray array]; //an array of NSData objects that need to be released when the block is released.
+	void *funcptr = construct_block_handler(nuBlock, [signature UTF8String], ffiData);
     
-	int i = (int)signature; //just some variable to be imported into the block to prevent
-    //a global block from being created
+    if (funcptr == NULL)
+        return nil;
+    
+	int i = 1;//(int)signature; //just some variable to be imported into the block to prevent a global block from being created
 	void(^cBlock)(void)=[^(void){printf("%i",i);} copy];
     
     //this definition from http://clang.llvm.org/docs/Block-ABI-Apple.txt
@@ -2551,8 +2553,7 @@ static id make_cblock (NuBlock *nuBlock, NSString *signature)
     
     block_struct->invoke=funcptr;
     
-    //make sure that the ffi_cif data gets released when the block does
-    NSData *ffiData = [NSData dataWithBytesNoCopy:ffiBytes length:sizeof(ffi_cif) freeWhenDone:YES];
+    //make sure that the various buffers allocated for the ffi gets released when the block does
     objc_setAssociatedObject(cBlock, "FFI_DATA", ffiData, OBJC_ASSOCIATION_RETAIN);
     
 	return cBlock;
@@ -2595,13 +2596,21 @@ static void objc_calling_nu_block_handler(ffi_cif* cif, void* returnvalue, void*
     }
 }
 
-static char **generate_block_userdata(NuBlock *nuBlock, const char *signature)
+
+static char **generate_block_userdata(NuBlock *nuBlock, const char *signature, NSMutableArray *ffiData)
 {
+    NSMutableData *data;
     NSMethodSignature *methodSignature = [NSMethodSignature signatureWithObjCTypes:signature];
     const char *return_type_string = [methodSignature methodReturnType];
     NSUInteger argument_count = [methodSignature numberOfArguments];
-    char **userdata = (char **) malloc ((argument_count+3) * sizeof(char*));
-    userdata[0] = (char *) malloc (2 + strlen(return_type_string));
+    
+    data = [NSMutableData dataWithLength:(argument_count+3) * sizeof(char*)];
+    char **userdata = (char **)[data mutableBytes];
+    [ffiData addObject:data];
+    
+    data = [NSMutableData dataWithLength:2 + strlen(return_type_string)];
+    userdata[0] = (char *)[data mutableBytes];
+    [ffiData addObject: data];
     
 	//assume blocks never return retained results
 	sprintf(userdata[0], " %s", return_type_string);
@@ -2612,7 +2621,9 @@ static char **generate_block_userdata(NuBlock *nuBlock, const char *signature)
     int i;
     for (i = 0; i < argument_count; i++) {
         const char *argument_type_string = [methodSignature getArgumentTypeAtIndex:i];
-        userdata[i+2] = strdup(argument_type_string);
+        data = [NSMutableData dataWithBytes:argument_type_string length:strlen(argument_type_string)+1];
+        userdata[i+2] = [data mutableBytes];
+        [ffiData addObject: data];
     }
     userdata[argument_count+2] = NULL;
 	
@@ -2626,9 +2637,10 @@ static char **generate_block_userdata(NuBlock *nuBlock, const char *signature)
 }
 
 
-static void *construct_block_handler(NuBlock *block, const char *signature, void **outCif)
+static void *construct_block_handler(NuBlock *block, const char *signature, NSMutableArray *ffiData)
 {
-    char **userdata = generate_block_userdata(block, signature);
+    NSMutableData *data;
+    char **userdata = generate_block_userdata(block, signature, ffiData);
     
     int argument_count = 0;
     while (userdata[argument_count] != 0) argument_count++;
@@ -2641,7 +2653,10 @@ static void *construct_block_handler(NuBlock *block, const char *signature, void
         return NULL;
     }
     
-    ffi_type **argument_types = (ffi_type **) malloc ((argument_count+1) * sizeof(ffi_type *));
+    data = [NSMutableData dataWithLength:(argument_count+1) * sizeof(ffi_type *)];
+    ffi_type **argument_types = (ffi_type **)[data mutableBytes];
+    [ffiData addObject: data];
+    
     ffi_type *result_type = ffi_type_for_objc_type(userdata[0]+1);
     
     argument_types[0] = ffi_type_for_objc_type("^?");
@@ -2649,10 +2664,15 @@ static void *construct_block_handler(NuBlock *block, const char *signature, void
     for (int i = 1; i < argument_count; i++)
         argument_types[i] = ffi_type_for_objc_type(userdata[i+1]);
     argument_types[argument_count] = NULL;
-    ffi_cif *cif = (ffi_cif *)malloc(sizeof(ffi_cif));
+    
+    data = [NSMutableData dataWithLength:sizeof(ffi_cif)];
+    ffi_cif *cif = (ffi_cif *)[data mutableBytes];
     if (cif == NULL) {
         NSLog(@"unable to prepare closure for signature %s (could not allocate memory for cif structure)", signature);
         return NULL;
+    }
+    else {
+        [ffiData addObject: data];
     }
     int status = ffi_prep_cif(cif, FFI_DEFAULT_ABI, argument_count, result_type, argument_types);
     if (status != FFI_OK) {
@@ -2676,7 +2696,6 @@ static void *construct_block_handler(NuBlock *block, const char *signature, void
         NSLog(@"unable to prepare closure for signature %s (mprotect failed with error %d)", signature, errno);
         return NULL;
     }
-    *outCif = cif;
     return (void*)closure;
 }
 
