@@ -88,7 +88,7 @@ static int set_objc_value_from_nu_value(void *objc_value, id nu_value, const cha
 static void *value_buffer_for_objc_type(const char *typeString);
 static NSString *signature_for_identifier(NuCell *cell, NuSymbolTable *symbolTable);
 static id help_add_method_to_class(Class classToExtend, id cdr, NSMutableDictionary *context, BOOL addClassMethod);
-static size_t size_of_objc_type(const char *typeString);
+static size_t size_of_objc_type(const char *typeString); 
 
 #pragma mark - NuHandler.h
 
@@ -563,6 +563,10 @@ id _nulist(id firstObject, ...)
 
 #pragma mark - NuBlock.m
 
+#if __BLOCKS__
+static void *construct_block_handler(NuBlock *block, const char *signature, NSMutableArray *ffiData);
+#endif
+
 @interface NuBlock ()
 {
 	NuCell *parameters;
@@ -804,6 +808,51 @@ static id getObjectFromContext(id context, id symbol)
 {
     return body;
 }
+
+#if __BLOCKS__
+
+- (id)cBlockWithSignature:(NSString*)signature
+{
+    NSMutableArray *ffiData = [NSMutableArray array]; //an array of NSData objects that need to be released when the block is released.
+	void *funcptr = construct_block_handler(self, [signature UTF8String], ffiData);
+    
+    if (funcptr == NULL)
+        return nil;
+    
+	int i = 1;//(int)signature; //just some variable to be imported into the block to prevent a global block from being created
+	void(^cBlock)(void)=[^(void){printf("%i",i);} copy];
+    
+    //this definition from http://clang.llvm.org/docs/Block-ABI-Apple.txt
+    struct Block_literal {
+        void *isa; // initialized to &_NSConcreteStackBlock or &_NSConcreteGlobalBlock
+        int flags;
+        int reserved; 
+        void (*invoke)(void *, ...);
+        struct Block_descriptor_1 {
+            unsigned long int reserved;	// NULL
+            unsigned long int size;         // sizeof(struct Block_literal_1)
+            // optional helper functions
+            void (*copy_helper)(void *dst, void *src);     // IFF (1<<25)
+            void (*dispose_helper)(void *src);             // IFF (1<<25)
+            // required ABI.2010.3.16
+            const char *signature;                         // IFF (1<<30)
+        } *descriptor;
+        // imported variables
+    } *block_struct = (void*)cBlock;
+    
+    block_struct->invoke=funcptr;
+    
+    //make sure that the various buffers allocated for the ffi gets released when the block does
+    objc_setAssociatedObject(cBlock, "FFI_DATA", ffiData, OBJC_ASSOCIATION_RETAIN);
+    
+    //and make sure that the NuBlock is around at least as long as the cBlock
+    objc_setAssociatedObject(cBlock, "NU_BLOCK", self, OBJC_ASSOCIATION_RETAIN);
+    
+	return [cBlock autorelease];
+
+}
+
+#endif
 
 @end
 
@@ -2477,87 +2526,7 @@ static id help_add_method_to_class(Class classToExtend, id cdr, NSMutableDiction
     }
 }
 
-#ifdef __BLOCKS__
-
-static id make_cblock (NuBlock *nuBlock, NSString *signature);
-static void objc_calling_nu_block_handler(ffi_cif* cif, void* returnvalue, void** args, void* userdata);
-static char **generate_block_userdata(NuBlock *nuBlock, const char *signature, NSMutableArray *ffiData);
-static void *construct_block_handler(NuBlock *block, const char *signature, NSMutableArray *ffiData);
-
-@interface NuBridgedBlock ()
-{
-	NuBlock *nuBlock;
-	id cBlock;
-}
-@end
-
-@implementation NuBridgedBlock
-
-+(id)cBlockWithNuBlock:(NuBlock*)nb signature:(NSString*)sig
-{
-	return [[[[self alloc] initWithNuBlock:nb signature:sig] autorelease] cBlock];
-}
-
--(id)initWithNuBlock:(NuBlock*)nb signature:(NSString*)sig
-{
-	nuBlock = [nb retain];
-	cBlock = make_cblock(nb,sig);
-	
-	return self;
-}
-
--(NuBlock*)nuBlock
-{return [[nuBlock retain] autorelease];}
-
--(id)cBlock
-{return [[cBlock retain] autorelease];}
-
--(void)dealloc
-{
-	[nuBlock release];
-	[cBlock release];
-	[super dealloc];
-}
-
-@end
-
-//the caller gets ownership of the block
-static id make_cblock (NuBlock *nuBlock, NSString *signature)
-{
-    NSMutableArray *ffiData = [NSMutableArray array]; //an array of NSData objects that need to be released when the block is released.
-	void *funcptr = construct_block_handler(nuBlock, [signature UTF8String], ffiData);
-    
-    if (funcptr == NULL)
-        return nil;
-    
-	int i = 1;//(int)signature; //just some variable to be imported into the block to prevent a global block from being created
-	void(^cBlock)(void)=[^(void){printf("%i",i);} copy];
-    
-    //this definition from http://clang.llvm.org/docs/Block-ABI-Apple.txt
-    struct Block_literal {
-        void *isa; // initialized to &_NSConcreteStackBlock or &_NSConcreteGlobalBlock
-        int flags;
-        int reserved; 
-        void (*invoke)(void *, ...);
-        struct Block_descriptor_1 {
-            unsigned long int reserved;	// NULL
-            unsigned long int size;         // sizeof(struct Block_literal_1)
-            // optional helper functions
-            void (*copy_helper)(void *dst, void *src);     // IFF (1<<25)
-            void (*dispose_helper)(void *src);             // IFF (1<<25)
-            // required ABI.2010.3.16
-            const char *signature;                         // IFF (1<<30)
-        } *descriptor;
-        // imported variables
-    } *block_struct = (void*)cBlock;
-    
-    block_struct->invoke=funcptr;
-    
-    //make sure that the various buffers allocated for the ffi gets released when the block does
-    objc_setAssociatedObject(cBlock, "FFI_DATA", ffiData, OBJC_ASSOCIATION_RETAIN);
-    
-	return cBlock;
-}
+#if __BLOCKS__
 
 static void objc_calling_nu_block_handler(ffi_cif* cif, void* returnvalue, void** args, void* userdata)
 {

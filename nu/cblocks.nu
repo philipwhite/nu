@@ -22,11 +22,11 @@
 ;; about the C block, you can use the 'cblock' macro instead.
 ;;
 
-(macro bridgedblock (ret params *body)
+(macro cblock (ret params *body)
     (progn
         ; Bail if blocks aren't enabled in the framework
-        (try ((NuBridgedBlock class)) 
-            (catch (execption) (throw* "NuException" "This build of Nu does not support C blocks.")))
+	(unless (NuBlock instancesRespondToSelector:"cBlockWithSignature:")
+		(throw* "NuException" "This build of Nu does not support C blocks."))	
                 
         (set __sig (signature (list ret)))
         (set __blockparams ())
@@ -43,8 +43,7 @@
             (set __blockparams (append __blockparams (list __param))))
         ;(puts "Signature: #{__sig}")
         ;(puts "Block params: #{__blockparams}")
-        `(((NuBridgedBlock alloc) initWithNuBlock:
-            (do ,__blockparams ,*body) signature:,__sig))))
+	`(send (do ,__blockparams ,*body) cBlockWithSignature:,__sig)))
 
 
-(macro cblock (ret params *body) `((bridgedblock ,ret ,params ,*body) cBlock))
+
